@@ -60,6 +60,21 @@ func NewSession(provider model.Provider, opts ...SessionOption) *Session {
 	return s
 }
 
+func (s *Session) recallMemories(ctx context.Context, query string) string {
+	memTool, ok := s.toolMgr.Get("memory_recall")
+	if !ok {
+		return ""
+	}
+
+	args := fmt.Sprintf(`{"query": %q, "limit": 3}`, query)
+	result, err := memTool.Execute(ctx, json.RawMessage(args))
+	if err != nil || result.IsError {
+		return ""
+	}
+
+	return result.Content
+}
+
 func (s *Session) ProcessMessage(ctx context.Context, msg bus.InboundMessage) error {
 	chatID := msg.ChatID
 	sessionKey := msg.SessionKey
@@ -82,9 +97,15 @@ func (s *Session) ProcessMessage(ctx context.Context, msg bus.InboundMessage) er
 		})
 	}
 
+	memories := s.recallMemories(ctx, msg.Content)
+	userContent := msg.Content
+	if memories != "" && !strings.Contains(memories, "No relevant memories found") {
+		userContent = fmt.Sprintf("%s\n\n[Retrieved memories]\n%s", msg.Content, memories)
+	}
+
 	s.messages = append(s.messages, model.Message{
 		Role:    "user",
-		Content: msg.Content,
+		Content: userContent,
 	})
 	s.mu.Unlock()
 
@@ -177,7 +198,7 @@ func (s *Session) processLoop(ctx context.Context, channel, chatID, sessionKey s
 			if event.ToolCall != nil {
 				toolCalls = append(toolCalls, *event.ToolCall)
 			}
-			if event.FinishReason != "" {
+			if event.FinishReason != "" && finishReason == "" {
 				finishReason = event.FinishReason
 			}
 		}

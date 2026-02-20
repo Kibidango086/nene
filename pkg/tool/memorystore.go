@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/nene-agent/nene/pkg/memory"
 )
@@ -76,8 +77,10 @@ func (t *MemoryStoreTool) Execute(ctx context.Context, args json.RawMessage) (Re
 
 	entry, err := t.mem.Store(ctx, req)
 	if err != nil {
+		fmt.Printf("memory_store error: %v\n", err)
 		return ErrorResult("failed to store memory: " + err.Error()), nil
 	}
 
-	return OkResult("Stored memory: " + entry.Key), nil
+	fmt.Printf("memory_store success: key=%s, category=%s\n", entry.Key, entry.Category)
+	return OkResult("✅ Stored memory: " + entry.Key), nil
 }

@@ -25,16 +25,17 @@ type TelegramConfig struct {
 }
 
 type StreamState struct {
-	messageID    int
-	chatID       int64
-	mu           sync.RWMutex
-	parts        map[string]*Part
-	toolCalls    map[string]*Part
-	toolCallList []string
-	currentText  *Part
-	iteration    int
-	isStreaming  bool
-	lastUpdate   time.Time
+	messageID       int
+	chatID          int64
+	mu              sync.RWMutex
+	parts           map[string]*Part
+	toolCalls       map[string]*Part
+	toolCallList    []string
+	currentText     *Part
+	iteration       int
+	isStreaming     bool
+	lastUpdate      time.Time
+	lastMessageSent time.Time
 }
 
 type Part struct {
@@ -48,10 +49,11 @@ type Part struct {
 
 func NewStreamState() *StreamState {
 	return &StreamState{
-		parts:        make(map[string]*Part),
-		toolCalls:    make(map[string]*Part),
-		toolCallList: make([]string, 0),
-		lastUpdate:   time.Now(),
+		parts:           make(map[string]*Part),
+		toolCalls:       make(map[string]*Part),
+		toolCallList:    make([]string, 0),
+		lastUpdate:      time.Now(),
+		lastMessageSent: time.Time{},
 	}
 }
 
@@ -59,6 +61,12 @@ func (s *StreamState) SetMessageID(id int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.messageID = id
+}
+
+func (s *StreamState) SetLastMessageSent(t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastMessageSent = t
 }
 
 func (s *StreamState) GetMessageID() int {
@@ -234,6 +242,20 @@ type TelegramChannel struct {
 	bot          *telego.Bot
 	config       TelegramConfig
 	streamStates sync.Map
+	toolDetails  sync.Map
+}
+
+type ToolDetails struct {
+	OriginalContent string
+	Tools           []ToolDetailItem
+}
+
+type ToolDetailItem struct {
+	ToolName string
+	ToolID   string
+	Input    map[string]interface{}
+	Output   string
+	Error    string
 }
 
 func NewTelegramChannel(cfg TelegramConfig, messageBus *bus.MessageBus) (*TelegramChannel, error) {
@@ -351,7 +373,7 @@ func (c *TelegramChannel) handleStreamEvent(ctx context.Context, msg bus.StreamM
 		} else {
 			state.UpdatePartDelta("main", msg.Content)
 		}
-		if time.Since(state.lastUpdate) > 500*time.Millisecond {
+		if state.lastMessageSent.IsZero() || time.Since(state.lastMessageSent) > 500*time.Millisecond {
 			c.updateStreamMessage(ctx, chatID, state)
 		}
 
@@ -438,13 +460,13 @@ func (c *TelegramChannel) sendNewStreamMessage(ctx context.Context, chatID int64
 		msg.ParseMode = ""
 		sentMsg, err = c.bot.SendMessage(ctx, msg)
 		if err != nil {
-			fmt.Printf("Failed to send message: %v\n", err)
 			return
 		}
 	}
 
 	state.SetMessageID(sentMsg.MessageID)
 	state.SetChatID(chatID)
+	state.SetLastMessageSent(time.Now())
 }
 
 func (c *TelegramChannel) finalizeStreamMessage(ctx context.Context, chatID int64, state *StreamState) {
@@ -467,12 +489,40 @@ func (c *TelegramChannel) finalizeStreamMessage(ctx context.Context, chatID int6
 		if len(state.toolCalls) > 0 {
 			editMsg.ReplyMarkup = tu.InlineKeyboard(
 				tu.InlineKeyboardRow(
-					tu.InlineKeyboardButton("📋 View Details").WithCallbackData("view_details"),
+					tu.InlineKeyboardButton("📋 View Details").WithCallbackData("view_details:0"),
 				),
 			)
 		}
 
-		c.bot.EditMessageText(ctx, editMsg)
+		if _, err := c.bot.EditMessageText(ctx, editMsg); err == nil {
+			if len(state.toolCalls) > 0 {
+				var tools []ToolDetailItem
+				for toolID, tool := range state.toolCalls {
+					item := ToolDetailItem{
+						ToolName: tool.ToolName,
+						ToolID:   toolID,
+					}
+					if input, ok := tool.State["input"].(map[string]interface{}); ok {
+						item.Input = input
+					}
+					if output, ok := tool.State["output"].(string); ok {
+						item.Output = output
+					}
+					if errMsg, ok := tool.State["error"].(string); ok {
+						item.Error = errMsg
+					}
+					tools = append(tools, item)
+				}
+				c.toolDetails.Store(fmt.Sprintf("%d", messageID), &ToolDetails{
+					OriginalContent: finalHTML,
+					Tools:           tools,
+				})
+			}
+		}
+	} else {
+		if finalContent != "" {
+			c.sendNewStreamMessage(ctx, chatID, state, markdownToTelegramHTML(finalContent))
+		}
 	}
 }
 
@@ -572,12 +622,134 @@ func (c *TelegramChannel) handleCallbackQuery(ctx context.Context, update telego
 	callback := update.CallbackQuery
 	data := callback.Data
 
-	if data == "view_details" {
-		c.bot.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
-			CallbackQueryID: callback.ID,
-			Text:            "Tool execution details are shown above",
-			ShowAlert:       true,
-		})
+	if strings.HasPrefix(data, "view_details:") {
+		msg := callback.Message
+		if msg == nil {
+			c.bot.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+				CallbackQueryID: callback.ID,
+				Text:            "Message not found",
+				ShowAlert:       true,
+			})
+			return
+		}
+
+		chatID, messageID, ok := extractChatAndMessageID(msg)
+		if !ok {
+			c.bot.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+				CallbackQueryID: callback.ID,
+				Text:            "Cannot access message",
+				ShowAlert:       true,
+			})
+			return
+		}
+
+		detailsInterface, ok := c.toolDetails.Load(fmt.Sprintf("%d", messageID))
+		if !ok {
+			c.bot.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+				CallbackQueryID: callback.ID,
+				Text:            "Details not found",
+				ShowAlert:       true,
+			})
+			return
+		}
+		details := detailsInterface.(*ToolDetails)
+
+		pageStr := strings.TrimPrefix(data, "view_details:")
+		page := 0
+		fmt.Sscanf(pageStr, "%d", &page)
+
+		c.showToolDetailPage(ctx, chatID, int64(messageID), details, page, callback.ID)
+	}
+}
+
+func (c *TelegramChannel) showToolDetailPage(ctx context.Context, chatID, messageID int64, details *ToolDetails, page int, callbackID string) {
+	if page < 0 {
+		page = 0
+	}
+	if page > len(details.Tools) {
+		page = len(details.Tools)
+	}
+
+	var content string
+	var keyboard *telego.InlineKeyboardMarkup
+
+	if page == 0 {
+		content = details.OriginalContent
+		if len(details.Tools) > 0 {
+			keyboard = tu.InlineKeyboard(
+				tu.InlineKeyboardRow(
+					tu.InlineKeyboardButton("📋 View Details").WithCallbackData("view_details:1"),
+				),
+			)
+		}
+	} else {
+		toolIdx := page - 1
+		if toolIdx >= len(details.Tools) {
+			toolIdx = len(details.Tools) - 1
+		}
+		tool := details.Tools[toolIdx]
+
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("<b>🔧 Tool %d/%d: %s</b>\n", page, len(details.Tools), tool.ToolName))
+		sb.WriteString(fmt.Sprintf("ID: <code>%s</code>\n", tool.ToolID))
+
+		if tool.Input != nil && len(tool.Input) > 0 {
+			argsJSON, _ := json.MarshalIndent(tool.Input, "", "  ")
+			argsStr := string(argsJSON)
+			if len(argsStr) > 1500 {
+				argsStr = argsStr[:1500] + "\n...[truncated]"
+			}
+			sb.WriteString(fmt.Sprintf("\n<b>Input:</b>\n<pre>%s</pre>\n", argsStr))
+		}
+
+		if tool.Output != "" {
+			output := tool.Output
+			if len(output) > 1500 {
+				output = output[:1500] + "\n...[truncated]"
+			}
+			sb.WriteString(fmt.Sprintf("\n<b>Output:</b>\n<pre>%s</pre>\n", output))
+		}
+
+		if tool.Error != "" {
+			errMsg := tool.Error
+			if len(errMsg) > 1000 {
+				errMsg = errMsg[:1000] + "\n...[truncated]"
+			}
+			sb.WriteString(fmt.Sprintf("\n<b>Error:</b>\n<pre>%s</pre>\n", errMsg))
+		}
+
+		content = sb.String()
+
+		var buttons []telego.InlineKeyboardButton
+		if page > 1 {
+			buttons = append(buttons, tu.InlineKeyboardButton("◀ Prev").WithCallbackData(fmt.Sprintf("view_details:%d", page-1)))
+		}
+		buttons = append(buttons, tu.InlineKeyboardButton("📋 Back").WithCallbackData("view_details:0"))
+		if page < len(details.Tools) {
+			buttons = append(buttons, tu.InlineKeyboardButton("Next ▶").WithCallbackData(fmt.Sprintf("view_details:%d", page+1)))
+		}
+		keyboard = tu.InlineKeyboard(tu.InlineKeyboardRow(buttons...))
+	}
+
+	editMsg := tu.EditMessageText(tu.ID(chatID), int(messageID), content)
+	editMsg.ParseMode = telego.ModeHTML
+	if keyboard != nil {
+		editMsg.ReplyMarkup = keyboard
+	}
+
+	c.bot.EditMessageText(ctx, editMsg)
+
+	c.bot.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+		CallbackQueryID: callbackID,
+	})
+}
+
+func extractChatAndMessageID(msg telego.MaybeInaccessibleMessage) (int64, int, bool) {
+	switch m := msg.(type) {
+	case *telego.Message:
+		return m.Chat.ID, m.MessageID, true
+	default:
+		return 0, 0, false
 	}
 }
 

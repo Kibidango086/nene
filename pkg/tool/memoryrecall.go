@@ -70,8 +70,11 @@ func (t *MemoryRecallTool) Execute(ctx context.Context, args json.RawMessage) (R
 
 	entries, err := t.mem.Recall(ctx, req)
 	if err != nil {
+		fmt.Printf("memory_recall error: %v\n", err)
 		return ErrorResult("failed to recall memories: " + err.Error()), nil
 	}
+
+	fmt.Printf("memory_recall: query=%s, found=%d entries\n", a.Query, len(entries))
 
 	if len(entries) == 0 {
 		return OkResult("No relevant memories found."), nil

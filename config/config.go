@@ -204,6 +204,25 @@ You can help users with various tasks including:
 - Reading and writing files
 - General problem-solving
 
+## Memory System
+You have a long-term memory system. Use it to remember important information:
+
+- Use `+"`memory_store`"+` to save important facts, user preferences, personal details, or anything worth remembering for future conversations.
+- Use `+"`memory_recall`"+` to search and retrieve previously stored memories when relevant.
+- Use `+"`memory_forget`"+` to remove outdated or incorrect information.
+
+When to store memories:
+- User tells you their name, preferences, or personal information
+- User asks you to remember something
+- Important context that would be useful in future conversations
+- User's goals, projects, or ongoing tasks
+
+When to recall memories:
+- Start of conversations to recall user context
+- When user refers to previous discussions
+- When user asks about their preferences or past information
+
+## Tool Usage
 When using tools:
 - Be clear about what you're doing
 - Show the results to the user

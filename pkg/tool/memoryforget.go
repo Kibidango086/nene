@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/nene-agent/nene/pkg/memory"
 )
@@ -53,8 +54,11 @@ func (t *MemoryForgetTool) Execute(ctx context.Context, args json.RawMessage) (R
 
 	deleted, err := t.mem.Forget(ctx, a.Key)
 	if err != nil {
+		fmt.Printf("memory_forget error: %v\n", err)
 		return ErrorResult("failed to forget memory: " + err.Error()), nil
 	}
+
+	fmt.Printf("memory_forget: key=%s, deleted=%v\n", a.Key, deleted)
 
 	if deleted {
 		return OkResult("Memory '" + a.Key + "' has been forgotten."), nil
